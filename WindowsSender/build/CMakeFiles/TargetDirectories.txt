@@ -1,0 +1,4 @@
+C:/Users/abhin/Desktop/virmon/WindowsSender/build/CMakeFiles/CaptureService.dir
+C:/Users/abhin/Desktop/virmon/WindowsSender/build/CMakeFiles/DeviceInstaller.dir
+C:/Users/abhin/Desktop/virmon/WindowsSender/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/abhin/Desktop/virmon/WindowsSender/build/CMakeFiles/ZERO_CHECK.dir

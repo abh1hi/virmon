@@ -1,0 +1,418 @@
+System Architecture
+We propose a two-part system. The Windows side installs a virtual display driver (Indirect Display Driver,
+IDD) so the OS sees a “fake” secondary monitor. A user‐mode service captures that virtual display’s frames
+(via the IDD or Desktop Duplication API) and hardware-encodes them (H.264/H.265) for streaming. Frames
+are sent over USB using a WinUSB-based transport. A lightweight control channel carries user input/events
+back to the PC. The Android side is a pure-Java app that runs in USB accessory mode. It uses
+UsbManager /
+UsbAccessory APIs to receive raw frame data over USB and feeds it to a 
+decoder whose output is shown on a 
+MediaCodec
+SurfaceView . The Android app also captures touch/pen events and
+sends them (via USB) to the PC for injection. 
+The architecture roughly consists of: 
+• 
+• 
+• 
+Windows (Host PC)
+Virtual Display Driver (IDD): A UMDF driver (using the IddCx class extension) that creates a virtual
+graphics adapter and monitor, reports modes, and delivers desktop frames
+1
+2
+. Runs in
+Session 0 for stability. 
+Capture Component: Uses the Desktop Duplication API or shared D3D surface to copy each
+rendered frame into GPU memory
+3
+• 
+• 
+3
+. Desktop Duplication provides per-frame metadata (dirty
+regions, cursor info) to optimize capture . 
+Encoder: Uses hardware encoders (NVIDIA NVENC, Intel Quick Sync, or AMD AMF) to compress
+frames to H.264/HEVC. These HW encoders offload video encoding from the CPU . For
+example, NVENC can encode multiple simultaneous H.264/HEVC streams in real time . 
+Transport (USB): A WinUSB-based endpoint presents a custom USB device. One bulk endpoint
+carries video packets, another for control and input. The PC service writes encoded frames to USB,
+while reading back input messages. USB 3.x provides ample bandwidth (~4 Gb/s in practice) for
+1080p video at moderate bitrates. 
+• 
+4
+5
+4
+Input Feedback: A control channel (or HID report via AOA) carries pointer and pen events from
+Android. On Windows, these are injected into the virtual display. Injection can use Windows input
+APIs (e.g. SendInput or 
+6
+Windows.UI.Input.Preview.Injection ) to simulate mouse/touch in the
+target virtual desktop . Alternatively, using AOA HID (AOAv2) allows Android to present as a USB
+HID tablet, so Windows naturally receives pointer events (no extra injection code needed) . 
+• 
+• 
+Android (Client Device)
+7
+6
+USB Accessory Mode: The app runs as an Android accessory (PC is USB host). Using 
+UsbManager
+and 
+UsbAccessory , the app opens the accessory and gets a 
+8
+FileDescriptor for streaming
+. It can then read/write raw bytes over USB. The app’s manifest declares 
+<uses-feature 
+android:name="android.hardware.usb.accessory"/> . 
+• 
+Video Decoder: A native Java class configures a 
+MediaCodec video decoder (e.g. MIME type
+“video/avc” or “video/hevc”) with output to a 
+SurfaceView ’s 
+Surface . The encoder data (NAL
+units) from USB is fed via 
+MediaCodec.dequeueInputBuffer and queued for decoding. Decoded
+1
+frames render on the 
+9
+• 
+• 
+6
+SurfaceView . This uses hardware-accelerated decode on Android. Most
+modern devices support H.264 and HEVC decoders . 
+Input Handling: The app captures Android touch, stylus, and multi-touch events with precise
+coordinates. It packages these as control messages (e.g. with event type, pointer ID, x/y, pressure)
+and sends them over USB back to the PC. If AOAv2 HID is used, the app can also generate USB HID
+reports for pointer/stylus input, which Windows will receive as native mouse or digitizer input
+. 
+Control Protocol: A small TCP-like control protocol (or defined message format) multiplexes on USB
+to convey commands (resolution change, heartbeat) and input events. 
+7
+An existing example is the open-source “Virtual Display Driver” project, which implements an IDD to provide
+custom virtual monitors for streaming and headless setups . Our design follows a similar model but
+adds tight integration with the Android app for low-latency streaming.
+10
+Data Flow & Sequence
+• 
+• 
+• 
+• 
+• 
+• 
+Frame Pipeline (PC→Android): 
+Desktop Render: Windows draws the virtual monitor’s frame (via GPU/DWM). 
+Capture: The PC service calls DXGI Desktop Duplication (or receives a frame from IddCx). Windows
+returns the current frame as a GPU texture plus metadata (dirty rects, cursor) . 
+Pre-processing: (Optional) Crop/resize if needed, overlay custom cursor. 
+Encode: Feed the frame into HW encoder (NVENC/QSV/AMF). Set low-latency encoding parameters
+(see below). The encoder outputs compressed NAL units. 
+3
+Packetization: Frame data is prefixed with a small header (e.g. length, timestamp, flags for
+keyframe) and written to the USB bulk pipe. 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+USB Transfer: The encoded packet streams over USB to the Android device. 
+Receive on Android: The app’s USB reader thread reads packets, parses headers, and extracts the H.
+264/H.265 data. 
+Decode: The app dequeues an input buffer from 
+MediaCodec , copies the packet into it, and
+queues it for decoding. 
+Render: The decoder outputs a frame to the 
+SurfaceView , which displays it on screen. 
+Input Pipeline (Android→PC): 
+User Interaction: The user touches or uses stylus on the Android screen. Android generates 
+MotionEvent s with (x,y,pressure,toolType) relative to the video view. 
+Event Packaging: The app transforms coordinates to the virtual display’s coordinate space. It
+packages each event (e.g. “pointer down/up/move”, id, x, y, pressure) into a small binary message. 
+USB Send: Send the event packet over USB (either same bulk channel with a distinct message type
+or via HID). 
+Receive on PC: The Windows service reads the event data. 
+Injection: Translate the event into a Windows input event targeting the virtual display. For example,
+call 
+SendInput with mouse move/click or use 
+InitializeTouchInjection APIs. If HID is used,
+Windows sees the event directly. 
+Display Update: Windows updates the pointer on the virtual monitor. If the driver supports a
+hardware cursor, the IDD will show the pointer as part of the next frame.
+2
+Android App (Java) Class Structure
+The Android app should be structured in clear Java classes, for example:
+• 
+• 
+MainActivity : Sets up the UI (
+SurfaceView ) and lifecycle. On startup it initializes the USB
+connection and decoder thread. 
+UsbService (or 
+UsbCommunicator ): Manages USB accessory mode. Obtains 
+listens for accessory attached intents, and calls 
+UsbManager ,
+openAccessory() . It spawns a background thread
+to read from the USB 
+FileDescriptor InputStream (for video/control). Video packets are pushed
+into a decoder queue; incoming input-ack or control packets are handled as needed. It also provides
+a method to send event packets out on the USB OutputStream. This uses the Android 
+UsbAccessory APIs . 
+8
+• 
+VideoDecoder : Configures a 
+it gets the 
+MediaCodec decoder with a surface. On 
+SurfaceView creation,
+Surface and calls 
+codec.configure(format, surface, null, 0) , then 
+codec.start() . In a loop (on a handler thread), it dequeues input buffers and fills them with raw
+frame data from the 
+UsbService . After queuing, it dequeues output frames automatically on the
+surface. 
+• 
+SurfaceView /
+SurfaceHolder.Callback : Provides the display surface for 
+MediaCodec . The
+app should handle 
+surfaceCreated /
+surfaceDestroyed (pause decoding on destroy to avoid
+errors). 
+• 
+InputHandler : An Android UI class (or the activity itself) that intercepts 
+onTouchEvent (and
+stylus-specific events). It converts touch coordinates and writes a binary struct to the 
+• 
+UsbService .
+Optionally, support multi-touch (report multiple pointers). 
+Control/Protocol: A helper to encode/decode the custom transport protocol. For example, define
+constants for message types (0x01 = video frame, 0x02 = input event, 0x03 = control). Prefix each
+packet with 
+[uint8 type][uint32 length] . 
+8
+All Android code is pure Java (or Kotlin), using only the standard USB and media APIs . No WebViews
+or hybrid frameworks are used.
+11
+Transport Protocol
+Design a simple framing protocol over the USB bulk endpoints (or AOA pipe):
+• 
+• 
+Message Types: e.g. 
+0x01 = VideoFrame , 
+0x02 = TouchEvent , 
+Header (for each message): 
+0x03 = Control . 
+[uint8 type][uint32 length] where 
+length is payload size.
+For 
+VideoFrame , payload = encoded NAL unit data (or series of NALs). For 
+• 
+• 
+• 
+• 
+TouchEvent , payload
+= fixed-size struct (e.g. type of touch event, pointer ID, normalized x/y, pressure). 
+Video Frames: Send keyframes periodically (every second or on resolution change). Each frame
+packet may contain one or more NALUs. Include a timestamp or frame number if needed to
+measure latency. 
+Input Events: Pack each MotionEvent (down/up/move) as a small struct. The PC must ACK or handle
+quickly to maintain responsiveness. Optionally, bundle a few events if needed. 
+Byte Order: Use little-endian for multibyte fields (standard for both Windows and Android). 
+Reliability: USB bulk is reliable (retransmits). For future Wi-Fi mode, an RTP/UDP layer with sequence
+numbers would be needed; initially USB covers loss. 
+3
+• 
+Synchronization: The Android app can send back a small ACK/control packet if needed. Otherwise,
+assume sequential delivery. 
+This protocol should be documented precisely (message layouts, IDs). The initial MVP can be simple; later
+improvements might include compression headers or dynamic bitrate requests.
+Encoder Configuration Guidelines
+To minimize CPU load and latency, configure the HW encoder for real-time performance:
+• 
+• 
+Codec: Use H.264 (AVC) Baseline or High profile (for compatibility) or H.265 (HEVC) if bandwidth is
+critical and all client devices support it. Android 5.0+ mandates HEVC decoding
+9
+, but H.264 has
+broader hardware support. 
+Resolution: Match the virtual monitor’s resolution (e.g. 1920×1080 or lower for USB). If bandwidth/
+CPU is limited, consider scaling to a lower size. 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+Frame Rate: Target ~30–60 FPS. For UI work 30 FPS is usually sufficient; higher (60 FPS) improves
+smoothness but doubles data. 
+12
+Bitrate: Use constant or variable bitrate targeting a few Mbps for 1080p. As a guideline, Android’s
+docs recommend ~2 Mbps for 720p@30fps , and roughly double that for 1080p. USB3 can handle
+tens of Mbps if needed. Rate-control: use CBR or constrained VBR to cap peaks. 
+Low-Latency Presets: On NVENC use the “low latency” preset (e.g. 
+NV_ENC_PRESET_LOW_LATENCY_HP ), which disables B-frames and minimizes buffer. On Intel or
+AMD, choose similarly. 
+Encoding Profile: Use a profile compatible with decoding on Android (Baseline or Main). Disable
+advanced features that increase latency (e.g. CABAC, lookahead). 
+Color Format: Output YUV 4:2:0 (NV12) as it maps directly to 
+MediaCodec input. 
+IDR Frames: Periodically (e.g. every 1s) insert an IDR frame to allow recovery. For a virtual display,
+you may re-IDR on static scenes. 
+Performance: Monitor encoder GPU utilization. On Windows server without display, headless
+encoding is fine. On Intel Quick Sync, ensure the driver is up-to-date; on AMD, use AMF. 
+These settings aim to keep encoding latency well under 100ms and achieve real-time rates, offloading as
+much as possible to GPU.
+Windows Input Injection
+User input from Android must be injected into the virtual monitor. Options include:
+• 
+• 
+• 
+USB HID (AOAv2): If implementing AOAv2 HID, Android can present as a generic tablet or mouse.
+Windows then natively receives pointer/pen input on the virtual display. This is the most seamless:
+touches/strokes map directly to Windows pointer events . 
+Windows Injection API: If using a custom protocol, the Windows service can call the input injection
+7
+APIs. For example, the 
+Windows.UI.Input.Preview.Injection.InputInjector can simulate
+touch or pen input
+6
+. For mouse input, 
+SendInput() works. Coordinates should be transformed
+to the virtual display’s DPI; Windows receives them as if from a real device. 
+IDD Support: Some IDDs support hardware cursors and might allow feeding cursor position. In
+general, injecting at the system level (API) is simpler than writing a kernel component. 
+4
+Regardless of method, ensure precise mapping: multi-touch and pressure data should map to
+corresponding Windows stylus inputs when possible. Testing should verify click/tap latency and accuracy.
+Performance and Latency Targets
+Our goal is interactive responsiveness and smooth video. Concretely: 
+• 
+• 
+Latency: End-to-end (touch on Android → action on PC) should ideally be <100ms. Nielsen’s usability
+study notes that ~0.1s delay is the limit for users to feel “direct” interaction . We should target
+~50–100ms round-trip. With USB (virtually no network delay), most latency comes from encode/
+decode and USB buffering. 
+13
+Frame Rate: Aim for ≥30 FPS, with 60 FPS as a stretch goal. Higher frame rates reduce perceived
+lag. 
+• 
+• 
+• 
+• 
+Jitter: USB is low-jitter, but for future Wi-Fi/ethernet, we must handle network variance (e.g. adaptive
+bitrate, buffering). 
+Resource Usage: Ensure CPU usage is minimal by using HW acceleration. Aim for a few percent CPU
+on a modern CPU, letting GPU/ASIC handle video. This ensures the host PC remains responsive. 
+Reliability: Video should maintain quality over brief input bursts or scene changes. Non-critical
+frames can be dropped if behind. 
+Wireless Phase: For eventual Wi-Fi support, additional targets include supporting 5 GHz Wi-Fi with
+QoS (preferably <50ms added latency on LAN) and using protocols like RTP/UDP to minimize
+overhead.
+Monitor performance during development. For example, Moonlight/Sunshine (NVIDIA’s game stream) often
+achieves <50ms on LAN. In testing, ensure the majority of latency is in the encode/decode pipeline, not
+network or frame capture.
+Roadmap and Milestones
+1. 
+2. 
+3. 
+4. 
+5. 
+6. 
+7. 
+8. 
+9. 
+10. 
+11. 
+12. 
+Phase 1 – USB MVP: 
+Implement the Windows IDD (can start from MS sample or Virtual-Display-Driver code) and a user
+mode service that captures frames via Desktop Duplication. 
+Hook up HW encoder (NVENC or Quick Sync). Ensure frames can be encoded and sent over USB. 
+Develop the Android accessory-mode app skeleton. Decode video into a SurfaceView and render. 
+Implement basic touch handling: capture Android touches, send to PC, inject with 
+SendInput() . 
+Achieve a working end-to-end prototype (USB only, one resolution, basic error handling). 
+Milestone: A Windows virtual display appears on Android, with touch control working. 
+Phase 2 – Wireless Support: 
+Abstract transport layer so that USB is one option. Add a network transport (initially TCP/UDP over
+LAN). Implement a simple socket server/client for frames and control. 
+Add discovery or configuration for IP mode. Handle MTU/payload sizes. 
+Test over Wi-Fi (2.4/5 GHz) and LAN, measure latency and bandwidth. Adjust buffering. 
+Possibly integrate a more robust protocol (e.g. RTP with packet ordering). 
+5
+Milestone: Ability to stream the display over Wi-Fi, with similar functionality as USB mode. 
+13. 
+14. 
+15. 
+16. 
+17. 
+18. 
+19. 
+Phase 3 – Performance Tuning: 
+Profile end-to-end latency. Optimize encoder settings (lower CPU threads, higher GPU priority, B
+frame tuning). Optimize Android decode path (low-latency output surfaces, threading). 
+Add dynamic bitrate/resolution adjustment for network mode (to adapt to varying Wi-Fi conditions). 
+Add enhancements: multi-touch gestures, stylus tilt, pinch-to-zoom with edge cases. 
+Polish user experience: full-screen mode, connection management, reconnection, UI for settings. 
+Future: Support audio forwarding if desired, multi-virtual-monitor support, Android background
+service, cross-platform clients. 
+Throughout, each component should be modular (e.g. clearly separate IDD vs capture vs encoding vs
+transport vs decoding). Early commits should include unit tests where possible (e.g. feeding pre-recorded
+frames into the encoder or checking USB streams). The Windows driver should be signed or test-signed for
+easy installation. Documentation (this spec) should be kept updated as the design evolves.
+13
+3
+Performance Targets: Interactive feel (≈0.1s) and fluid video (≥30 FPS) . Using proven technologies
+(IDD, Desktop Duplication, MediaCodec, NVENC) ensures we leverage hardware to meet these targets. With
+phased development, we first prove functionality (USB link) and then iterate for wireless and optimization.
+This design provides clear guidance for each component’s role and how data flows end-to-end, aligning with
+Windows graphics driver models and Android’s media/USB APIs . 
+1
+1
+12
+3
+12
+Sources: Microsoft’s IDD and Desktop Duplication docs ; Android accessory and USB docs ;
+Media codec format support and recommendations ; hardware encoding references ; and user
+input guidelines
+13
+6
+. These guided the technical choices above. 
+11
+4
+5
+8
+1
+2
+Indirect Display Driver Model Overview - Windows drivers | Microsoft Learn
+https://learn.microsoft.com/en-us/windows-hardware/drivers/display/indirect-display-driver-model-overview
+3
+Desktop Duplication - Windows drivers | Microsoft Learn
+https://learn.microsoft.com/en-us/windows-hardware/drivers/display/desktop-duplication-api
+4
+5
+Hardware Acceleration on Windows | Emby Documentation
+https://emby.media/support/articles/Hardware-Acceleration-on-Windows.html
+6
+Simulate user input through input injection - Windows apps | Microsoft Learn
+https://learn.microsoft.com/en-us/windows/apps/develop/input/input-injection
+7
+11
+Android Open Accessory (AOA)  |  Android Open Source Project
+https://source.android.com/docs/core/interaction/accessories/protocol
+8
+USB accessory overview  |  Connectivity  |  Android Developers
+https://developer.android.com/develop/connectivity/usb/accessory
+9
+12
+Supported media formats  |  Android media  |  Android Developers
+https://developer.android.com/media/platform/supported-formats
+6
+10
+GitHub - VirtualDrivers/Virtual-Display-Driver: Add virtual monitors to your windows 10/11 device! Works
+with VR, OBS, Sunshine, and/or any desktop sharing software.
+https://github.com/VirtualDrivers/Virtual-Display-Driver
+13
+Response Time Limits: Article by Jakob Nielsen - NN/G
+https://www.nngroup.com/articles/response-times-3-important-limits/

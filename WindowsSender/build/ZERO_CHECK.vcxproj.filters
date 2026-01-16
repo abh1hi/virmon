@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\abhin\Desktop\virmon\WindowsSender\build\CMakeFiles\76e55dd7bef442d7c3bc866e7b06208c\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{4682FFE1-F6B6-32EF-9C02-E78DD6058D1C}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

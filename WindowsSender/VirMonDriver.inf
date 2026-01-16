@@ -1,0 +1,58 @@
+;
+; VirMonDriver.inf
+;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=Display
+ClassGuid={4d36e968-e325-11ce-bfc1-08002be10318}
+Provider=%ManufacturerName%
+CatalogFile=VirMonDriver.cat
+DriverVer=01/15/2026,1.0.0.0
+
+[DestinationDirs]
+DefaultDestDir = 12,UMDF
+Drivers_Dir = 12,UMDF
+VirMonDriver_Device_CoInstaller_CopyFiles = 11
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+VirMonDriver.dll = 1,,
+
+[Manufacturer]
+%ManufacturerName%=Standard,NT$ARCH$
+
+[Standard.NT$ARCH$]
+%DeviceName%=VirMonDriver_Device, ROOT\VirMonDriver
+
+[VirMonDriver_Device]
+CopyFiles=Drivers_Dir
+
+[Drivers_Dir]
+VirMonDriver.dll
+
+[VirMonDriver_Device.Services]
+AddService=WUDFRd,0x000001fa,WUDFRd_ServiceInstall
+
+[WUDFRd_ServiceInstall]
+DisplayName = %WudfRdDisplayName%
+ServiceType = 1
+StartType = 3
+ErrorControl = 1
+ServiceBinary = %12%\WUDFRd.sys
+
+[VirMonDriver_Device.Wdf]
+UmdfService=VirMonDriver,VirMonDriver_Install
+UmdfServiceOrder=VirMonDriver
+
+[VirMonDriver_Install]
+UmdfLibraryVersion=$UMDFVERSION$
+ServiceBinary=%12%\UMDF\VirMonDriver.dll
+
+[Strings]
+ManufacturerName="VirMon Open Source"
+DiskName="VirMon Driver Installation Disk"
+DeviceName="VirMon Virtual Display"
+WudfRdDisplayName="Windows Driver Foundation - User-mode Driver Framework Reflector"
